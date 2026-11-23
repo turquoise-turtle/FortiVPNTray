@@ -203,12 +203,14 @@ final class AppModel: ObservableObject {
         helperFeedback = nil
         helperFeedbackIsError = false
         let resources = Bundle.main.resourceURL
+        // The helper connects only to the gateways approved here, behind the admin prompt.
+        let profiles = self.profiles
         Task {
             do {
                 let mode: CallerCheckMode? = try await Task.detached {
                     if install {
                         guard let resources else { throw VPNError("App bundle resources were not found.") }
-                        return try HelperInstaller.install(resourceDirectory: resources)
+                        return try HelperInstaller.install(resourceDirectory: resources, profiles: profiles)
                     }
                     try HelperInstaller.uninstall()
                     return nil

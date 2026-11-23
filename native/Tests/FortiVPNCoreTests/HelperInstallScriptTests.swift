@@ -106,6 +106,77 @@ struct HelperInstallScriptTests {
         """)
     }
 
+    // MARK: Approved gateways
+
+    private func profile(_ host: String, _ port: Int, pins: [String] = [], name: String = "Office") -> VPNProfile {
+        var profile = VPNProfile()
+        profile.name = name; profile.host = host; profile.port = port; profile.trustedCerts = pins
+        return profile
+    }
+
+    @Test func testApprovedGatewaysComeFromTheValidProfiles() throws {
+        let pin = String(repeating: "AB", count: 32)
+        let gateways = HelperInstaller.approvedGateways(for: [
+            profile(" VPN.Example.com ", 10443, pins: [pin]),
+            profile("-c/tmp/x", 443),                       // not a host: never approved
+            profile("other.example.com", 0),                // not a port
+            profile("vpn.example.com", 10443, pins: [String(repeating: "cd", count: 32)]),
+            profile("nameless.example.com", 443, name: " "),
+            profile("192.0.2.9", 443),
+        ])
+        #expect(gateways.map(\.argument) == ["vpn.example.com:10443,\(pin.lowercased()),\(String(repeating: "cd", count: 32))", "192.0.2.9:443"])
+        #expect(HelperInstaller.approvedGateways(for: []).isEmpty)
+    }
+
+    @Test func testInstallPromptNamesEveryGateway() throws {
+        let pin = String(repeating: "ab", count: 32)
+        let gateways = [try AllowedGateway(host: "vpn.example.com", port: 10443), try AllowedGateway(host: "b.example.com", port: 443, trustedCerts: [pin]),
+                        try AllowedGateway(host: "c.example.com", port: 443, trustedCerts: [pin, String(repeating: "cd", count: 32)])]
+        #expect(HelperInstaller.installPrompt(gateways: gateways) ==
+                "FortiVPNTray wants to install its VPN helper and allow it to connect to: vpn.example.com:10443, b.example.com:443 (with 1 pinned certificate), "
+                + "c.example.com:443 (with 2 pinned certificates). Cancel if you do not recognise every one of them.")
+        #expect(HelperInstaller.installPrompt(gateways: []).contains("No VPN gateway will be approved"))
+    }
+
+    /// The prompt travels as an argument, like the script, and the AppleScript compiles.
+    @Test func testAdministratorArgumentsWithAPrompt() throws {
+        let plain = Commands.administratorArguments(script: "echo hi", prompt: nil)
+        #expect(plain == ["-e", "on run argv", "-e", "do shell script (item 1 of argv) with administrator privileges", "-e", "end run", "/bin/bash -c 'echo hi'"])
+        let prompt = "Allow \"vpn.example.com\"? It's 'quoted'."
+        let prompted = Commands.administratorArguments(script: "echo hi", prompt: prompt)
+        #expect(prompted == ["-e", "on run argv", "-e", "do shell script (item 1 of argv) with prompt (item 2 of argv) with administrator privileges",
+                             "-e", "end run", "/bin/bash -c 'echo hi'", prompt])
+        for arguments in [plain, prompted] {
+            // Compiled only, never run: no password dialog appears.
+            let source = arguments.enumerated().filter { $0.offset % 2 == 1 && $0.offset < 6 }.flatMap { ["-e", $0.element] }
+            let output = FileManager.default.temporaryDirectory.appendingPathComponent("prompt-\(UUID().uuidString).scpt")
+            defer { try? FileManager.default.removeItem(at: output) }
+            let result = try Commands.run("/usr/bin/osacompile", source + ["-o", output.path])
+            #expect(result.status == 0, "\(result.text)")
+        }
+    }
+
+    @Test func testPlistCarriesTheApprovedGateways() throws {
+        let gateways = [try AllowedGateway(host: "vpn.example.com", port: 10443), try AllowedGateway(host: "b.example.com", port: 443, trustedCerts: [String(repeating: "ab", count: 32)])]
+        let arguments = try HelperLaunchArguments(allowedUID: 501, callerCheck: .signed(leafSHA1: Self.leaf), gateways: gateways)
+        let plist = HelperInstallScript.plist(arguments: arguments)
+        #expect(plist.contains("""
+        \t\t<string>--client-req-leaf</string>
+        \t\t<string>\(Self.leaf)</string>
+        \t\t<string>--allowed-gateway</string>
+        \t\t<string>vpn.example.com:10443</string>
+        \t\t<string>--allowed-gateway</string>
+        \t\t<string>b.example.com:443,\(String(repeating: "ab", count: 32))</string>
+        \t</array>
+        """))
+        let parsed = try #require(try PropertyListSerialization.propertyList(from: Data(plist.utf8), format: nil) as? [String: Any])
+        let program = try #require(parsed["ProgramArguments"] as? [String])
+        #expect(try HelperLaunchArguments(parsing: Array(program.dropFirst())) == arguments)
+        // The whole install script still parses with them in it.
+        let script = try HelperInstallScript.install(arguments: arguments, bundledHelper: Self.bundled, bundledHelperSHA256: Self.hash)
+        #expect(try bash(["-n", "-c", script]).status == 0)
+    }
+
     /// What goes into ProgramArguments is exactly what the helper's parser accepts back.
     @Test func testPlistArgumentsParseBack() throws {
         for arguments in [try Self.signed(), try Self.uidOnly()] {

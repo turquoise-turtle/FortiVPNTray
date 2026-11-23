@@ -111,8 +111,44 @@ struct CallerCheckTests {
         #expect(garbage == Reply(value: nil, error: ConnectRequest.Rejection.malformed.description))
     }
 
+    /// Launch arguments that approve the test gateway, as an install with such a profile writes them.
+    private func approving(_ gateways: [AllowedGateway]? = nil, uid: uid_t = getuid()) throws -> HelperLaunchArguments {
+        try HelperLaunchArguments(allowedUID: uid, callerCheck: .uidOnly, gateways: try gateways ?? [AllowedGateway(host: "vpn.example.com", port: 443)])
+    }
+
+    /// A caller that passes the caller check still cannot choose where root connects or
+    /// which certificate it trusts there: the app reads both from a file any process of
+    /// the user can rewrite.
+    @Test func testConnectIsRefusedForAGatewayOrPinThatWasNotApproved() async throws {
+        let pin = String(repeating: "ab", count: 32)
+        let other = String(repeating: "cd", count: 32)
+        func connect(_ arguments: HelperLaunchArguments, _ request: ConnectRequest, sessions: SessionController) async throws -> Reply? {
+            let data = request.json()
+            return try await call(arguments, sessions: sessions) { proxy, done in proxy.connect(data) { done(Reply(value: $0, error: $1)) } }
+        }
+        let refused = Reply(value: nil, error: HelperService.gatewayNotApproved)
+
+        // No gateway approved (a plist from before this check, or an install without profiles): nothing connects.
+        let none = SessionController(launcher: AcceptingLauncher())
+        #expect(try await connect(try HelperLaunchArguments(allowedUID: getuid(), callerCheck: .uidOnly),
+                                  try ConnectRequest(host: "vpn.example.com", port: 443), sessions: none) == refused)
+        #expect(none.status() == HelperStatus())
+
+        let sessions = SessionController(launcher: AcceptingLauncher())
+        let arguments = try approving([try AllowedGateway(host: "vpn.example.com", port: 443, trustedCerts: [pin])])
+        // Another host, another port, and the approved host with a pin of the caller's own.
+        #expect(try await connect(arguments, try ConnectRequest(host: "vpn.attacker.example", port: 443, trustedCerts: [other]), sessions: sessions) == refused)
+        #expect(try await connect(arguments, try ConnectRequest(host: "vpn.example.com", port: 8443), sessions: sessions) == refused)
+        #expect(try await connect(arguments, try ConnectRequest(host: "vpn.example.com", port: 443, trustedCerts: [pin, other]), sessions: sessions) == refused)
+        #expect(sessions.status() == HelperStatus(), "nothing was started")
+
+        // The approved gateway with the approved pin, in any letter case, connects.
+        let accepted = try #require(try await connect(arguments, try ConnectRequest(host: "VPN.example.com", port: 443, trustedCerts: [pin]), sessions: sessions))
+        #expect(accepted.error == nil && accepted.value != nil)
+    }
+
     @Test func testConnectStatusAndLogOverXPC() async throws {
-        let arguments = try HelperLaunchArguments(allowedUID: getuid(), callerCheck: .uidOnly)
+        let arguments = try approving()
         let sessions = SessionController(launcher: AcceptingLauncher())
         let request = try ConnectRequest(host: "vpn.example.com", port: 443).json()
         let connected = try #require(try await call(arguments, sessions: sessions) { proxy, done in
@@ -142,7 +178,7 @@ struct CallerCheckTests {
 
     @Test func testRefusedCallerCannotConnect() async throws {
         let sessions = SessionController(launcher: AcceptingLauncher())
-        let arguments = try HelperLaunchArguments(allowedUID: getuid() + 1, callerCheck: .uidOnly)
+        let arguments = try approving(uid: getuid() + 1)
         let request = try ConnectRequest(host: "vpn.example.com", port: 443).json()
         let reply = try await call(arguments, sessions: sessions) { proxy, done in proxy.connect(request) { done(Reply(value: $0, error: $1)) } }
         #expect(reply == nil)
