@@ -3,9 +3,9 @@ import FortiVPNShared
 
 /// Starts the root-owned openfortivpn copy for one session (PLAN.md 2.3).
 ///
-/// Before each spawn the whole install is verified; the config file is written
-/// to the run directory; the child gets a fixed argv and environment. The config
-/// file is deleted once the tunnel is up and when the child exits.
+/// Before each spawn the whole install and Apple's pppd are verified; the config file
+/// is written to the run directory; the child gets a fixed argv and environment. The
+/// config file is deleted once the tunnel is up and when the child exits.
 ///
 /// `SessionController` never calls `start` and `stop` concurrently, and calls
 /// `stop` only after `start` has returned, so the child is always recorded here
@@ -31,16 +31,18 @@ final class OpenFortiVPNLauncher: TunnelLauncher, @unchecked Sendable {
 
     let install: OpenFortiVPNInstall
     let runDirectory: RunDirectory
+    let pppd: PPPDaemon
     let processes: any ProcessTable
     /// Test hook: called after the child is spawned and before it is recorded.
     private let spawned: (@Sendable (pid_t) -> Void)?
     private let lock = NSLock()
     private var child: Child?
 
-    init(install: OpenFortiVPNInstall = .production, runDirectory: RunDirectory = .production,
+    init(install: OpenFortiVPNInstall = .production, runDirectory: RunDirectory = .production, pppd: PPPDaemon = .production,
          processes: any ProcessTable = SystemProcessTable(), spawned: (@Sendable (pid_t) -> Void)? = nil) {
         self.install = install
         self.runDirectory = runDirectory
+        self.pppd = pppd
         self.processes = processes
         self.spawned = spawned
     }
@@ -65,6 +67,7 @@ final class OpenFortiVPNLauncher: TunnelLauncher, @unchecked Sendable {
         guard locked({ child == nil }) else { throw Failure(description: "openfortivpn is already running.") }
         guard UUID(uuidString: sessionID) != nil else { throw Failure(description: "Bad session id.") }
         try install.verify()
+        try pppd.check()
         let config = try OpenFortiVPNConfig.render(request)
         try runDirectory.prepare()
         let configName = sessionID + ".conf"
