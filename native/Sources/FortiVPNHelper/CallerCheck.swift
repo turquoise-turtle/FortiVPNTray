@@ -12,6 +12,7 @@ final class CallerCheck: NSObject, NSXPCListenerDelegate {
     private let allowedUID: uid_t
     private let requirement: String?
     private let mode: CallerCheckMode
+    private let gateways: [AllowedGateway]
     private let sessions: SessionController
     private let log = Logger(subsystem: AppIdentity.helperLabel, category: "caller-check")
 
@@ -20,6 +21,7 @@ final class CallerCheck: NSObject, NSXPCListenerDelegate {
         allowedUID = arguments.allowedUID
         self.sessions = sessions
         mode = arguments.callerCheck.mode
+        gateways = arguments.gateways
         switch arguments.callerCheck {
         case .signed(let leafSHA1):
             guard let requirement = CallerRequirement.string(identifier: clientIdentifier, leafSHA1: leafSHA1) else { return nil }
@@ -39,7 +41,7 @@ final class CallerCheck: NSObject, NSXPCListenerDelegate {
             connection.setCodeSigningRequirement(requirement)
         }
         connection.exportedInterface = NSXPCInterface(with: HelperXPCProtocol.self)
-        connection.exportedObject = HelperService(mode: mode, sessions: sessions)
+        connection.exportedObject = HelperService(mode: mode, sessions: sessions, gateways: gateways)
         connection.resume()
         return true
     }

@@ -38,5 +38,5 @@ guard let callerCheck = CallerCheck(arguments: launchArguments, sessions: sessio
 let listener = NSXPCListener(machServiceName: HelperTransport.machServiceName)
 listener.delegate = callerCheck
 listener.resume()
-log.notice("Helper \(HelperTransport.helperVersion, privacy: .public) listening, caller check: \(launchArguments.callerCheck.mode.rawValue, privacy: .public), allowed uid \(launchArguments.allowedUID, privacy: .public)")
+log.notice("Helper \(HelperTransport.helperVersion, privacy: .public) listening, caller check: \(launchArguments.callerCheck.mode.rawValue, privacy: .public), allowed uid \(launchArguments.allowedUID, privacy: .public), approved gateways: \(launchArguments.gateways.count, privacy: .public)")
 RunLoop.main.run()

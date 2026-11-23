@@ -90,6 +90,90 @@ struct HelperTransportTests {
         expectRejected(["--allowed-uid", "501", "--client-req-leaf", hash, "--client-req-leaf", hash], "given twice")
     }
 
+    // MARK: Approved gateways
+
+    private let pinA = String(repeating: "a1", count: 32)
+    private let pinB = String(repeating: "b2", count: 32)
+
+    @Test func testGatewayArgumentRoundTrip() throws {
+        let plain = try AllowedGateway(host: "vpn.example.com", port: 10443)
+        #expect(plain.argument == "vpn.example.com:10443")
+        #expect(try AllowedGateway(parsing: plain.argument) == plain)
+        let pinned = try AllowedGateway(host: "VPN.Example.com", port: 443, trustedCerts: [pinA, pinB, pinA])
+        #expect(pinned.host == "vpn.example.com")
+        #expect(pinned.trustedCerts == [pinA, pinB])
+        #expect(pinned.argument == "vpn.example.com:443,\(pinA),\(pinB)")
+        #expect(try AllowedGateway(parsing: pinned.argument) == pinned)
+        #expect(try AllowedGateway(parsing: "192.0.2.10:8443").host == "192.0.2.10")
+    }
+
+    @Test func testGatewayArgumentRejectsAnythingElse() {
+        for text in ["", "vpn.example.com", "vpn.example.com:", ":443", "vpn.example.com:0", "vpn.example.com:65536", "vpn.example.com:+443",
+                     "vpn.example.com:0443", "vpn.example.com:443:1", "VPN.example.com:443", "-c/tmp/x:443", "vpn.example.com:443,",
+                     "vpn.example.com:443,abc", "vpn.example.com:443,\(pinA.uppercased())", "vpn.example.com:443,\(pinA),\(pinA)",
+                     "vpn.example.com:443 ", "vpn.example.com:443\n", "vpn.exa mple.com:443", "vpn.example.com:443,\(pinA) "] {
+            #expect(throws: AllowedGateway.Invalid.self, "\(text)") { try AllowedGateway(parsing: text) }
+        }
+        #expect(throws: AllowedGateway.Invalid.self) { try AllowedGateway(host: "vpn.example.com", port: 443, trustedCerts: Array(repeating: pinA, count: 17)) }
+    }
+
+    @Test func testGatewayAllowsOnlyItsOwnHostPortAndPins() throws {
+        let gateway = try AllowedGateway(host: "vpn.example.com", port: 10443, trustedCerts: [pinA])
+        func request(_ host: String, _ port: Int, _ pins: [String] = []) throws -> ConnectRequest {
+            try ConnectRequest(host: host, port: port, trustedCerts: pins)
+        }
+        #expect(gateway.allows(try request("vpn.example.com", 10443)))
+        #expect(gateway.allows(try request("VPN.EXAMPLE.COM", 10443, [pinA])))
+        #expect(!gateway.allows(try request("vpn.example.com", 443)))
+        #expect(!gateway.allows(try request("vpn.example.org", 10443)))
+        #expect(!gateway.allows(try request("evil.vpn.example.com", 10443)))
+        #expect(!gateway.allows(try request("vpn.example.com", 10443, [pinB])), "a pin the helper was not given")
+        #expect(!gateway.allows(try request("vpn.example.com", 10443, [pinA, pinB])))
+        // No approved pin: the system's trust store decides, and no pin may be added.
+        let unpinned = try AllowedGateway(host: "vpn.example.com", port: 10443)
+        #expect(unpinned.allows(try request("vpn.example.com", 10443)))
+        #expect(!unpinned.allows(try request("vpn.example.com", 10443, [pinA])))
+    }
+
+    @Test func testGatewaysAreMergedPerHostAndPort() throws {
+        let merged = AllowedGateway.merged([try AllowedGateway(host: "vpn.example.com", port: 443, trustedCerts: [pinA]),
+                                            try AllowedGateway(host: "other.example.com", port: 443),
+                                            try AllowedGateway(host: "VPN.example.com", port: 443, trustedCerts: [pinB, pinA]),
+                                            try AllowedGateway(host: "vpn.example.com", port: 8443)])
+        #expect(merged.map(\.argument) == ["vpn.example.com:443,\(pinA),\(pinB)", "other.example.com:443", "vpn.example.com:8443"])
+    }
+
+    @Test func testLaunchArgumentsCarryTheGateways() throws {
+        let gateways = [try AllowedGateway(host: "vpn.example.com", port: 10443), try AllowedGateway(host: "b.example.com", port: 443, trustedCerts: [pinA])]
+        let arguments = try HelperLaunchArguments(allowedUID: 501, callerCheck: .signed(leafSHA1: hash), gateways: gateways)
+        #expect(arguments.arguments == ["--allowed-uid", "501", "--client-req-leaf", hash,
+                                        "--allowed-gateway", "vpn.example.com:10443", "--allowed-gateway", "b.example.com:443,\(pinA)"])
+        #expect(try HelperLaunchArguments(parsing: arguments.arguments) == arguments)
+        // None given means none approved; it is never an error and never "any".
+        #expect(try HelperLaunchArguments(parsing: ["--allowed-uid", "501", "--uid-only"]).gateways.isEmpty)
+    }
+
+    @Test func testLaunchArgumentsRejectBadGateways() {
+        func expectRejected(_ arguments: [String], _ fragment: String) {
+            do {
+                _ = try HelperLaunchArguments(parsing: arguments)
+                Issue.record("accepted \(arguments)")
+            } catch {
+                #expect(String(describing: error).contains(fragment), "\(error)")
+            }
+        }
+        let base = ["--allowed-uid", "501", "--uid-only"]
+        expectRejected(base + ["--allowed-gateway"], "needs a value")
+        expectRejected(base + ["--allowed-gateway", "vpn.example.com"], "host:port")
+        expectRejected(base + ["--allowed-gateway", "VPN.example.com:443"], "canonical")
+        expectRejected(base + ["--allowed-gateway", "vpn.example.com:443", "--allowed-gateway", "vpn.example.com:443,\(pinA)"], "given twice")
+        expectRejected(base + (1...65).flatMap { ["--allowed-gateway", "h\($0).example.com:443"] }, "more than 64")
+        #expect(throws: HelperLaunchArguments.ParseError.self) {
+            let twice = [try AllowedGateway(host: "vpn.example.com", port: 443), try AllowedGateway(host: "vpn.example.com", port: 443)]
+            _ = try HelperLaunchArguments(allowedUID: 501, callerCheck: .uidOnly, gateways: twice)
+        }
+    }
+
     @Test func testRequirementString() {
         #expect(CallerRequirement.string(identifier: "eu.dvad.fortivpntray", leafSHA1: hash)
                 == "identifier \"eu.dvad.fortivpntray\" and certificate leaf = H\"0123456789ABCDEF0123456789ABCDEF01234567\" and info[CFBundleVersion] >= \"6\"")

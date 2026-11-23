@@ -33,10 +33,18 @@ public enum Commands {
     /// Runs `script` with bash as root behind one admin prompt. The script travels as an
     /// argument to the AppleScript, never inside its source, so nothing in it needs
     /// AppleScript escaping; the shell sees it as one single-quoted word.
-    public static func administrator(script: String) throws {
-        let result = try run("/usr/bin/osascript", ["-e", "on run argv", "-e", "do shell script (item 1 of argv) with administrator privileges", "-e", "end run",
-                                                    administratorCommand(script: script)])
+    /// `prompt` replaces the system's generic sentence in the password dialog.
+    public static func administrator(script: String, prompt: String? = nil) throws {
+        let result = try run("/usr/bin/osascript", administratorArguments(script: script, prompt: prompt))
         guard result.status == 0 else { throw VPNError(administratorError(result.text)) }
+    }
+    /// osascript's arguments. The prompt, like the script, is passed as an argument of the
+    /// AppleScript and never placed in its source.
+    static func administratorArguments(script: String, prompt: String?) -> [String] {
+        let statement = prompt == nil
+            ? "do shell script (item 1 of argv) with administrator privileges"
+            : "do shell script (item 1 of argv) with prompt (item 2 of argv) with administrator privileges"
+        return ["-e", "on run argv", "-e", statement, "-e", "end run", administratorCommand(script: script)] + (prompt.map { [$0] } ?? [])
     }
     static func administratorCommand(script: String) -> String {
         "/bin/bash -c " + shellQuote(script)
@@ -55,16 +63,41 @@ public enum HelperInstaller {
     /// UID is this app's user and the pinned certificate is the one this app is signed
     /// with; both are read here, never typed. Returns the caller check the helper now
     /// uses: `.uidOnly` means the app is ad-hoc signed, which the UI must say.
-    public static func install(resourceDirectory: URL) throws -> CallerCheckMode {
+    /// The gateways and pins of `profiles` become the only ones the helper connects to;
+    /// the password dialog names them, because the profile file is user-writable.
+    public static func install(resourceDirectory: URL, profiles: [VPNProfile]) throws -> CallerCheckMode {
         let source = resourceDirectory.appendingPathComponent(HelperInstallScript.bundledHelperName)
         guard FileManager.default.isExecutableFile(atPath: source.path) else { throw VPNError("The bundled helper is missing. Rebuild the .app using native/scripts/build.sh.") }
         let uid = getuid()
         guard uid != 0 else { throw VPNError("Run FortiVPNTray as your own user, not as root.") }
         let leaf = CodeSignature.leafSHA1OfRunningCode()
-        let arguments = try HelperLaunchArguments(allowedUID: uid, callerCheck: leaf.map { .signed(leafSHA1: $0) } ?? .uidOnly)
+        let gateways = approvedGateways(for: profiles)
+        let arguments = try HelperLaunchArguments(allowedUID: uid, callerCheck: leaf.map { .signed(leafSHA1: $0) } ?? .uidOnly, gateways: gateways)
         let hash = SHA256.hash(data: try Data(contentsOf: source)).map { String(format: "%02x", $0) }.joined()
-        try Commands.administrator(script: try HelperInstallScript.install(arguments: arguments, bundledHelper: source.path, bundledHelperSHA256: hash))
+        try Commands.administrator(script: try HelperInstallScript.install(arguments: arguments, bundledHelper: source.path, bundledHelperSHA256: hash),
+                                   prompt: installPrompt(gateways: gateways))
         return arguments.callerCheck.mode
+    }
+
+    /// The gateways of the valid profiles, one entry per host and port with their pins merged.
+    static func approvedGateways(for profiles: [VPNProfile]) -> [AllowedGateway] {
+        let valid = profiles.compactMap { profile -> AllowedGateway? in
+            guard let profile = try? profile.validated() else { return nil }
+            return try? AllowedGateway(host: profile.host, port: profile.port, trustedCerts: profile.trustedCerts)
+        }
+        return Array(AllowedGateway.merged(valid).prefix(HelperLaunchArguments.maxGateways))
+    }
+
+    /// What the password dialog says: every gateway approved, and how many pins.
+    static func installPrompt(gateways: [AllowedGateway]) -> String {
+        guard !gateways.isEmpty else {
+            return "FortiVPNTray wants to install its VPN helper. No VPN gateway will be approved, because there is no saved profile: add one, then repair the helper."
+        }
+        let list = gateways.map { gateway -> String in
+            let pins = gateway.trustedCerts.count
+            return "\(gateway.host):\(gateway.port)" + (pins == 0 ? "" : " (with \(pins) pinned certificate\(pins == 1 ? "" : "s"))")
+        }.joined(separator: ", ")
+        return "FortiVPNTray wants to install its VPN helper and allow it to connect to: \(list). Cancel if you do not recognise every one of them."
     }
 
     /// Refused while the helper reports a session; the script refuses too while the

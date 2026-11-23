@@ -39,6 +39,73 @@ public enum CallerCheckMode: String, Sendable, Equatable {
     func pendingSAMLURL(reply: @escaping @Sendable (String?) -> Void)
 }
 
+/// A gateway the helper may connect to, with the certificate pins it may use there.
+/// The list is fixed in the launch arguments, behind the admin prompt: the app takes
+/// host and pins from a profile file any process of the user can rewrite.
+public struct AllowedGateway: Equatable, Sendable {
+    public struct Invalid: Error, Equatable, CustomStringConvertible {
+        public let description: String
+        init(_ description: String) { self.description = description }
+    }
+
+    /// Lowercase: host names are compared without regard to case.
+    public let host: String
+    public let port: Int
+    /// The SHA-256 fingerprints the helper may hand to openfortivpn for this gateway.
+    public let trustedCerts: [String]
+
+    public init(host: String, port: Int, trustedCerts: [String] = []) throws {
+        guard Validation.host(host) else { throw Invalid("not a hostname or IPv4 address") }
+        guard ConnectRequest.ports.contains(port) else { throw Invalid("not a port") }
+        guard trustedCerts.count <= ConnectRequest.maxTrustedCerts, trustedCerts.allSatisfy(Validation.digest) else {
+            throw Invalid("not a list of at most \(ConnectRequest.maxTrustedCerts) certificate fingerprints")
+        }
+        self.host = host.lowercased()
+        self.port = port
+        var unique: [String] = []
+        for cert in trustedCerts where !unique.contains(cert) { unique.append(cert) }
+        self.trustedCerts = unique
+    }
+
+    /// `host:port`, then `,<fingerprint>` for each pin. None of the parts can contain ':' or ','.
+    public var argument: String {
+        (["\(host):\(port)"] + trustedCerts).joined(separator: ",")
+    }
+
+    public init(parsing argument: String) throws {
+        let parts = argument.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+        let address = parts[0].split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+        guard address.count == 2, !address[1].isEmpty, address[1].utf8.allSatisfy({ (48...57).contains($0) }),
+              address[1].utf8.first != 48, let port = Int(address[1]) else {
+            throw Invalid("not of the form host:port[,fingerprint…]")
+        }
+        try self.init(host: address[0], port: port, trustedCerts: Array(parts.dropFirst()))
+        // One spelling only, so what the installer wrote is what the helper reads.
+        guard self.argument == argument else { throw Invalid("not in its canonical form") }
+    }
+
+    /// Whether `request` goes to this gateway and asks for no pin beyond the approved ones.
+    public func allows(_ request: ConnectRequest) -> Bool {
+        request.host.lowercased() == host && request.port == port && request.trustedCerts.allSatisfy(trustedCerts.contains)
+    }
+
+    /// One entry per `host:port`, pins merged, in first-seen order: the list for a set of profiles.
+    public static func merged(_ gateways: [AllowedGateway]) -> [AllowedGateway] {
+        var result: [AllowedGateway] = []
+        for gateway in gateways {
+            if let index = result.firstIndex(where: { $0.host == gateway.host && $0.port == gateway.port }) {
+                // Only too many pins together can fail; the first entry then stays.
+                if let both = try? AllowedGateway(host: gateway.host, port: gateway.port, trustedCerts: result[index].trustedCerts + gateway.trustedCerts) {
+                    result[index] = both
+                }
+            } else {
+                result.append(gateway)
+            }
+        }
+        return result
+    }
+}
+
 /// The helper's launch arguments. They are written into the launchd plist at
 /// install time, behind the admin prompt, and are the only source of the allowed
 /// UID and the pinned certificate. The installer builds them with `arguments`
@@ -65,21 +132,28 @@ public struct HelperLaunchArguments: Equatable, Sendable {
     public static let allowedUIDFlag = "--allowed-uid"
     public static let leafFlag = "--client-req-leaf"
     public static let uidOnlyFlag = "--uid-only"
+    /// Once per gateway the helper may connect to; see `AllowedGateway.argument`.
+    public static let gatewayFlag = "--allowed-gateway"
+    public static let maxGateways = 64
     /// Not a launch argument: the installer runs the helper with only this flag to check
     /// the openfortivpn copy as root, and the helper exits after the check (PLAN.md 2.6).
     public static let verifyInstallFlag = "--verify-install"
 
     public let allowedUID: uid_t
     public let callerCheck: CallerCheck
+    /// The only gateways `connect` is accepted for. Empty means none: nothing is defaulted.
+    public let gateways: [AllowedGateway]
 
-    /// - Throws: `ParseError` if `allowedUID` is 0 or `leafSHA1` is not 40 hex digits.
-    public init(allowedUID: uid_t, callerCheck: CallerCheck) throws {
+    /// - Throws: `ParseError` if `allowedUID` is 0, `leafSHA1` is not 40 hex digits, or there
+    ///   are too many gateways or two entries for one `host:port`.
+    public init(allowedUID: uid_t, callerCheck: CallerCheck, gateways: [AllowedGateway] = []) throws {
         self.allowedUID = try Self.checkedUID(allowedUID)
         if case .signed(let hash) = callerCheck {
             self.callerCheck = .signed(leafSHA1: try Self.normalizedHash(hash))
         } else {
             self.callerCheck = callerCheck
         }
+        self.gateways = try Self.checkedGateways(gateways)
     }
 
     /// Arguments after the executable path, as they go into `ProgramArguments`.
@@ -89,6 +163,7 @@ public struct HelperLaunchArguments: Equatable, Sendable {
         case .signed(let hash): result += [Self.leafFlag, hash]
         case .uidOnly: result += [Self.uidOnlyFlag]
         }
+        for gateway in gateways { result += [Self.gatewayFlag, gateway.argument] }
         return result
     }
 
@@ -100,6 +175,7 @@ public struct HelperLaunchArguments: Equatable, Sendable {
         var uid: uid_t?
         var hash: String?
         var uidOnly = false
+        var gateways: [AllowedGateway] = []
         var index = 0
         func value(for flag: String) throws -> String {
             guard index + 1 < arguments.count else { throw ParseError("\(flag) needs a value") }
@@ -123,6 +199,11 @@ public struct HelperLaunchArguments: Equatable, Sendable {
             case Self.uidOnlyFlag:
                 guard !uidOnly else { throw ParseError("\(flag) given twice") }
                 uidOnly = true
+            case Self.gatewayFlag:
+                let text = try value(for: flag)
+                do { gateways.append(try AllowedGateway(parsing: text)) } catch {
+                    throw ParseError("\(flag) is \(error): \(text)")
+                }
             default:
                 throw ParseError("unknown argument: \(flag)")
             }
@@ -136,6 +217,17 @@ public struct HelperLaunchArguments: Equatable, Sendable {
         case (_?, true): throw ParseError("\(Self.leafFlag) and \(Self.uidOnlyFlag) exclude each other")
         }
         self.allowedUID = uid
+        self.gateways = try Self.checkedGateways(gateways)
+    }
+
+    private static func checkedGateways(_ gateways: [AllowedGateway]) throws -> [AllowedGateway] {
+        guard gateways.count <= maxGateways else { throw ParseError("more than \(maxGateways) \(gatewayFlag) arguments") }
+        for (index, gateway) in gateways.enumerated() {
+            guard !gateways[..<index].contains(where: { $0.host == gateway.host && $0.port == gateway.port }) else {
+                throw ParseError("\(gatewayFlag) given twice for \(gateway.host):\(gateway.port)")
+            }
+        }
+        return gateways
     }
 
     /// The helper serves one logged-in user. Root never needs it, and a 0 here
