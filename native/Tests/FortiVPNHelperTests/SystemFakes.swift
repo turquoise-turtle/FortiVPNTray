@@ -78,12 +78,16 @@ final class FakeNetwork: NetworkControl, @unchecked Sendable {
     private var _failing: Set<String> = []
     let addresses: [String: String]
     let systemResolvers: [String]
+    /// Addresses that have a host route before any session; nil means the lookup fails.
+    let hostRoutes: Set<String>?
 
     init(defaultRoute: DefaultRoute? = DefaultRoute(gateway: "192.0.2.1", interface: "en0"),
-         addresses: [String: String] = ["vpn.example.com": "198.51.100.7"], systemResolvers: [String] = ["192.0.2.53"]) {
+         addresses: [String: String] = ["vpn.example.com": "198.51.100.7"], systemResolvers: [String] = ["192.0.2.53"],
+         hostRoutes: Set<String>? = []) {
         _defaultRoute = defaultRoute
         self.addresses = addresses
         self.systemResolvers = systemResolvers
+        self.hostRoutes = hostRoutes
     }
 
     var calls: [Call] { lock.withLock { _calls } }
@@ -107,6 +111,8 @@ final class FakeNetwork: NetworkControl, @unchecked Sendable {
     func defaultRoute() -> DefaultRoute? { currentDefaultRoute }
     func resolveIPv4(_ host: String) -> String? { addresses[host] ?? (Validation.ipv4(host) ? host : nil) }
     func systemDNSServers() -> [String] { systemResolvers }
+
+    func hasHostRoute(to address: String) -> Bool? { hostRoutes?.contains(address) }
 
     func deleteHostRoute(_ address: String) throws { try record(.deleteHostRoute(address), "deleteHostRoute") }
 
