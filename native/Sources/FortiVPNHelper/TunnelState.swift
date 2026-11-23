@@ -10,7 +10,9 @@ struct TunnelState: Codable, Equatable, Sendable {
     var pppd: ProcessIdentity?
     /// The session's ppp interface, `^ppp[0-9]+$`.
     var interface: String?
-    /// The gateway's IPv4 address as the helper resolved it, for its host route.
+    /// The gateway's IPv4 address as the helper resolved it, whose host route cleanup
+    /// removes. Nil if the address is unknown, or if a host route to it stood in the
+    /// table before the session: that one is not the session's to remove.
     var serverIP: String?
     /// The IPv4 gateway of the default route before the session.
     var gateway: String?

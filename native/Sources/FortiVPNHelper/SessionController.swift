@@ -230,6 +230,14 @@ final class SessionController: @unchecked Sendable {
         "https://\(request.host):\(request.port)/remote/saml/start?redirect=1" + (request.realm.map { "&realm=" + $0 } ?? "")
     }
 
+    /// Whether a resolved IPv4 address can be a VPN gateway's: not "this network" (0/8),
+    /// loopback (127/8), multicast (224/4) or reserved and broadcast (240/4). Root starts
+    /// openfortivpn towards the address and both of them change the route to it.
+    static func canBeAGateway(_ address: String) -> Bool {
+        guard Validation.ipv4(address), let first = address.split(separator: ".").first.flatMap({ Int($0) }) else { return false }
+        return first != 0 && first != 127 && first < 224
+    }
+
     /// Whether `line` is one of openfortivpn's own INFO or DEBUG lines (`log.c`). Only those
     /// tell the helper resolvers, suffixes and addresses. ERROR lines repeat text from
     /// outside: for a gateway certificate it does not trust, openfortivpn prints the
@@ -252,7 +260,14 @@ final class SessionController: @unchecked Sendable {
         try systemLock.withLock {
             sweepLocked()
             let network = cleanup.network
-            let state = TunnelState(sessionID: sessionID, serverIP: network.resolveIPv4(request.host), gateway: network.defaultRoute()?.gateway)
+            let serverIP = network.resolveIPv4(request.host)
+            if let serverIP, !Self.canBeAGateway(serverIP) {
+                throw Refusal(description: "The gateway's address is a loopback, multicast or reserved address; the helper does not connect there.")
+            }
+            // Cleanup removes the gateway's host route, which openfortivpn adds. One that is
+            // there already, or cannot be checked for, is not the session's and stays.
+            let routeIsTheSessions = serverIP.map { network.hasHostRoute(to: $0) == false } ?? false
+            let state = TunnelState(sessionID: sessionID, serverIP: routeIsTheSessions ? serverIP : nil, gateway: network.defaultRoute()?.gateway)
             let fallback = request.useSystemDNSFallback ? network.systemDNSServers() : []
             do { try store.save(state) } catch {
                 throw Refusal(description: "Cannot save the session state: \(error)")

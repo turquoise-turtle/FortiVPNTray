@@ -17,6 +17,9 @@ protocol NetworkControl: Sendable {
     func resolveIPv4(_ host: String) -> String?
     /// The resolvers the system uses now (`State:/Network/Global/DNS`), IPv4 only.
     func systemDNSServers() -> [String]
+    /// Whether the routing table has a host route of its own to exactly `address`
+    /// (not one cloned from a network route). Nil if that could not be found out.
+    func hasHostRoute(to address: String) -> Bool?
     func deleteHostRoute(_ address: String) throws
     func replaceDefaultRoute(gateway: String) throws
     func setDNS(_ configuration: DNSConfiguration) throws
@@ -36,6 +39,30 @@ enum RouteCommand {
 
     static let getDefault = ["-n", "get", "default"]
     static let deleteDefault = ["-n", "delete", "default"]
+
+    static func getHost(_ address: String) throws -> [String] {
+        guard Validation.ipv4(address) else { throw NetworkFailure(description: "Not an IPv4 address.") }
+        return ["-n", "get", "-host", address]
+    }
+
+    /// Reads `route -n get -host <address>`: true if the route found is a host route to
+    /// exactly `address` that stands in the table by itself. A lookup that falls through
+    /// to a network or the default route names that as its destination; an entry the
+    /// kernel cloned for a neighbour (`WASCLONED`) comes back on demand and is nobody's.
+    static func parseOwnHostRoute(_ output: String, address: String) -> Bool {
+        var destination: String?
+        var flags: [Substring] = []
+        for line in output.split(separator: "\n") {
+            let parts = line.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            guard parts.count == 2 else { continue }
+            switch parts[0] {
+            case "destination": destination = parts[1]
+            case "flags": flags = parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "<>")).split(separator: ",")
+            default: break
+            }
+        }
+        return destination == address && flags.contains("HOST") && !flags.contains("WASCLONED")
+    }
 
     static func deleteHost(_ address: String) throws -> [String] {
         guard Validation.ipv4(address) else { throw NetworkFailure(description: "Not an IPv4 address.") }
@@ -151,6 +178,14 @@ struct SystemNetwork: NetworkControl {
               let value = SCDynamicStoreCopyValue(store, Self.globalDNSKey as CFString) as? [String: Any],
               let servers = value["ServerAddresses"] as? [String] else { return [] }
         return servers.filter(Validation.ipv4)
+    }
+
+    func hasHostRoute(to address: String) -> Bool? {
+        guard let arguments = try? RouteCommand.getHost(address),
+              let result = try? SystemCommand.run(RouteCommand.path, arguments) else { return nil }
+        // No route to the address at all is an answer too.
+        if result.status != 0 { return result.output.contains("not in table") ? false : nil }
+        return RouteCommand.parseOwnHostRoute(result.output, address: address)
     }
 
     func deleteHostRoute(_ address: String) throws {

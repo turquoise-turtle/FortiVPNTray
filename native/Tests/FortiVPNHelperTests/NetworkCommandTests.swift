@@ -16,6 +16,58 @@ struct NetworkCommandTests {
         }
     }
 
+    /// Output of `route -n get -host` on macOS 26.7 for the three kinds of answer.
+    @Test func testOnlyAHostRouteOfItsOwnCounts() throws {
+        #expect(try RouteCommand.getHost("198.51.100.7") == ["-n", "get", "-host", "198.51.100.7"])
+        #expect(throws: NetworkFailure.self) { try RouteCommand.getHost("198.51.100.7 -ifscope en0") }
+        let loopback = """
+           route to: 127.0.0.1
+        destination: 127.0.0.1
+          interface: lo0
+              flags: <UP,HOST,DONE,LOCAL>
+        """
+        #expect(RouteCommand.parseOwnHostRoute(loopback, address: "127.0.0.1"))
+        let userStatic = """
+           route to: 198.51.100.7
+        destination: 198.51.100.7
+            gateway: 192.0.2.1
+          interface: en0
+              flags: <UP,GATEWAY,HOST,DONE,STATIC>
+        """
+        #expect(RouteCommand.parseOwnHostRoute(userStatic, address: "198.51.100.7"))
+        // No host route: the lookup falls through to the default route.
+        let viaDefault = """
+           route to: 198.51.100.7
+        destination: default
+               mask: default
+            gateway: 192.0.2.1
+          interface: en0
+              flags: <UP,GATEWAY,DONE,STATIC,PRCLONING,GLOBAL>
+        """
+        #expect(!RouteCommand.parseOwnHostRoute(viaDefault, address: "198.51.100.7"))
+        // A neighbour on the local network: cloned by the kernel, recreated on demand.
+        let cloned = """
+           route to: 192.0.2.1
+        destination: 192.0.2.1
+          interface: en0
+              flags: <UP,HOST,DONE,LLINFO,WASCLONED,IFSCOPE,IFREF,ROUTER>
+        """
+        #expect(!RouteCommand.parseOwnHostRoute(cloned, address: "192.0.2.1"))
+        #expect(!RouteCommand.parseOwnHostRoute(loopback, address: "127.0.0.2"))
+        #expect(!RouteCommand.parseOwnHostRoute("destination: 127.0.0.1\n      flags: <UP,GHOST>\n", address: "127.0.0.1"))
+        #expect(!RouteCommand.parseOwnHostRoute("route: writing to routing socket: not in table", address: "127.0.0.1"))
+        #expect(!RouteCommand.parseOwnHostRoute("", address: "127.0.0.1"))
+    }
+
+    @Test func testWhichAddressesCanBeAGateway() {
+        for address in ["198.51.100.7", "10.0.0.1", "192.168.1.1", "172.16.0.1", "1.1.1.1", "223.255.255.254", "169.254.1.1"] {
+            #expect(SessionController.canBeAGateway(address), "\(address)")
+        }
+        for address in ["127.0.0.1", "127.255.255.254", "0.0.0.0", "0.1.2.3", "224.0.0.1", "239.255.255.250", "240.0.0.1", "255.255.255.255", "", "vpn.example.com", "1.2.3"] {
+            #expect(!SessionController.canBeAGateway(address), "\(address)")
+        }
+    }
+
     @Test func testParseDefaultRoute() {
         let wifi = """
            route to: default

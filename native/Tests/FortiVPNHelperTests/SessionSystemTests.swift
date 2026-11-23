@@ -82,6 +82,54 @@ struct SessionSystemTests {
         #expect(harness.sessions.status().vpnIP == "192.0.2.200")
     }
 
+    /// Cleanup removes the host route to the gateway. A route that was there before the
+    /// session (the loopback route, a static route of the user's) is not the session's.
+    @Test func testAHostRouteThatWasThereBeforeIsNeverRemoved() throws {
+        let harness = try Harness(network: FakeNetwork(hostRoutes: ["198.51.100.7"]))
+        let (_, _) = try connectAndComeUp(harness)
+        #expect(try harness.saved()?.serverIP == nil)
+        harness.sessions.disconnect()
+        #expect(!harness.network.calls.contains(.deleteHostRoute("198.51.100.7")))
+        #expect(harness.network.calls.contains(.removeDNS), "the rest of the cleanup still runs")
+
+        // If the table cannot be read, nothing is removed on a guess.
+        let unknown = try Harness(network: FakeNetwork(hostRoutes: nil))
+        _ = try connectAndComeUp(unknown)
+        unknown.sessions.disconnect()
+        #expect(!unknown.network.calls.contains(.deleteHostRoute("198.51.100.7")))
+
+        // Without one, the session's own route is removed as before.
+        let usual = try Harness()
+        _ = try connectAndComeUp(usual)
+        #expect(try usual.saved()?.serverIP == "198.51.100.7")
+        usual.sessions.disconnect()
+        #expect(usual.network.calls.contains(.deleteHostRoute("198.51.100.7")))
+    }
+
+    /// `127.0.0.1` is a valid IPv4 host, and `route -n delete -host 127.0.0.1` as root takes
+    /// the loopback route away. Such an address is refused before anything is started,
+    /// whether it was given as a literal or is what a name resolves to.
+    @Test func testAGatewayOnLoopbackOrAReservedAddressIsRefused() throws {
+        let network = FakeNetwork(addresses: ["localhost.example.com": "127.0.0.1", "vpn.example.com": "198.51.100.7"], hostRoutes: ["127.0.0.1"])
+        let harness = try Harness(network: network)
+        for host in ["127.0.0.1", "127.9.9.9", "0.0.0.0", "224.0.0.1", "255.255.255.255", "localhost.example.com"] {
+            let request = try ConnectRequest(host: host, port: 443)
+            let result = SessionControllerTests.attempt { try harness.sessions.connect(request) }
+            guard case .failure(let refusal) = result else {
+                Issue.record("connected to \(host)")
+                harness.sessions.disconnect()
+                continue
+            }
+            #expect(refusal.description.contains("loopback, multicast or reserved"), "\(host): \(refusal.description)")
+            #expect(harness.sessions.status().state == .idle)
+            #expect(try harness.saved() == nil, "\(host)")
+        }
+        #expect(harness.network.calls.isEmpty, "no route or DNS call for a refused gateway")
+        // An ordinary gateway still connects afterwards.
+        #expect(try !harness.sessions.connect(request).isEmpty)
+        harness.sessions.disconnect()
+    }
+
     @Test func testSystemResolversAreTheFallbackOnlyWhenAskedFor() throws {
         let fallback = try Harness()
         _ = try connectAndComeUp(fallback, dns: false)
