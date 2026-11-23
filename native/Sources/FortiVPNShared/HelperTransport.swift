@@ -6,8 +6,9 @@ public enum HelperTransport {
     public static let machServiceName = AppIdentity.helperLabel
     /// Bumped whenever the XPC interface changes incompatibly.
     public static let protocolVersion = 1
-    /// Version of the Swift helper itself.
-    public static let helperVersion = "0.3.0"
+    /// Version of the Swift helper itself. Raised whenever what the installer writes or the
+    /// helper enforces changes, so that Settings can ask for a repair.
+    public static let helperVersion = "0.4.0"
 }
 
 /// How the helper decides which callers it talks to. The raw value crosses XPC.

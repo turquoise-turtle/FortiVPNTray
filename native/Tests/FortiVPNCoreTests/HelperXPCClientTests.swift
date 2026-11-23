@@ -36,7 +36,7 @@ struct HelperXPCClientTests {
         }
 
         func version(reply: @escaping @Sendable (String, Int, String) -> Void) {
-            if !silent { reply("0.3.0", HelperTransport.protocolVersion, mode) }
+            if !silent { reply(HelperTransport.helperVersion, HelperTransport.protocolVersion, mode) }
         }
         func status(reply: @escaping @Sendable (Data) -> Void) {
             if !silent { reply(status) }
@@ -81,7 +81,7 @@ struct HelperXPCClientTests {
         defer { fixture.invalidate() }
         let client = fixture.client
         let result = await offPool { try client.version() }
-        #expect(result == .success(HelperVersion(version: "0.3.0", protocolVersion: HelperTransport.protocolVersion, mode: .signed)))
+        #expect(result == .success(HelperVersion(version: HelperTransport.helperVersion, protocolVersion: HelperTransport.protocolVersion, mode: .signed)))
     }
 
     @Test func testUIDOnlyMode() async {
