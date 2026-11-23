@@ -12,27 +12,44 @@ struct CoreTests {
     @Test func testHelperInstallationClassifiesFilesAndServiceIndependently() {
         typealias Status = HelperInstallationStatus
         let current = HelperVersion(version: HelperTransport.helperVersion, protocolVersion: HelperTransport.protocolVersion, mode: .signed)
-        // The version string may change freely; only the protocol decides (PLAN.md 2.6).
-        let otherBuild = HelperVersion(version: "old", protocolVersion: HelperTransport.protocolVersion, mode: .signed)
-        let otherProtocol = HelperVersion(version: HelperTransport.helperVersion, protocolVersion: HelperTransport.protocolVersion + 1, mode: .signed)
+        let otherBuild = HelperVersion(version: "0.3.0", protocolVersion: HelperTransport.protocolVersion, mode: .signed)
+        let otherProtocol = HelperVersion(version: "0.3.0", protocolVersion: HelperTransport.protocolVersion + 1, mode: .signed)
         expectEqual(Status(executablePresent: false, launchDaemonPresent: false, helper: nil).state, .missing)
         expectEqual(Status(executablePresent: true, launchDaemonPresent: false, helper: nil).state, .incomplete)
         expectEqual(Status(executablePresent: false, launchDaemonPresent: true, helper: nil).state, .incomplete)
         expectEqual(Status(executablePresent: true, launchDaemonPresent: true, helper: nil).state, .unavailable)
         expectEqual(Status(executablePresent: true, launchDaemonPresent: true, helper: current).state, .ready)
-        expectEqual(Status(executablePresent: true, launchDaemonPresent: true, helper: otherBuild).state, .ready)
+        expectEqual(Status(executablePresent: true, launchDaemonPresent: true, helper: otherBuild).state, .repairRecommended)
+        // The protocol decides first: only it stops a connect.
         expectEqual(Status(executablePresent: true, launchDaemonPresent: true, helper: otherProtocol).state, .versionMismatch)
         // A still-running process with removed files is not a verified installation/removal.
         expectEqual(Status(executablePresent: false, launchDaemonPresent: false, helper: current).state, .incomplete)
     }
+    @Test func testHelperFromAnOlderAppVersionIsFlaggedForRepair() {
+        // What Install/Repair writes can change without the XPC interface changing.
+        let old = HelperInstallationStatus(executablePresent: true, launchDaemonPresent: true,
+                                           helper: HelperVersion(version: "0.3.0", protocolVersion: HelperTransport.protocolVersion, mode: .signed))
+        expectEqual(old.state, .repairRecommended)
+        expectEqual(old.title, "Installed · repair recommended")
+        expectEqual(old.detail, "The helper is version 0.3.0; this app expects \(HelperTransport.helperVersion). Repair / Reinstall Helper updates it.")
+        expectTrue(old.detail.contains("0.4.0"))
+        expectEqual(old.callerCheck, "Caller check: Signed caller check")
+        let current = HelperInstallationStatus(executablePresent: true, launchDaemonPresent: true,
+                                               helper: HelperVersion(version: HelperTransport.helperVersion, protocolVersion: HelperTransport.protocolVersion, mode: .signed))
+        expectEqual(current.state, .ready)
+        expectEqual(current.title, "Installed and running")
+        let silent = HelperInstallationStatus(executablePresent: true, launchDaemonPresent: true, helper: nil)
+        expectEqual(silent.state, .unavailable)
+        expectEqual(silent.title, "Installed · not responding")
+    }
     @Test func testHelperStatusShowsTheCallerCheckAndWarnsAboutUIDOnly() {
         let signed = HelperInstallationStatus(executablePresent: true, launchDaemonPresent: true,
-                                              helper: HelperVersion(version: "0.3.0", protocolVersion: HelperTransport.protocolVersion, mode: .signed))
-        expectEqual(signed.detail, "Version 0.3.0 · Ready to connect.")
+                                              helper: HelperVersion(version: HelperTransport.helperVersion, protocolVersion: HelperTransport.protocolVersion, mode: .signed))
+        expectEqual(signed.detail, "Version \(HelperTransport.helperVersion) · Ready to connect.")
         expectEqual(signed.callerCheck, "Caller check: Signed caller check")
         expectFalse(signed.callerCheckIsWeak)
         let uidOnly = HelperInstallationStatus(executablePresent: true, launchDaemonPresent: true,
-                                               helper: HelperVersion(version: "0.3.0", protocolVersion: HelperTransport.protocolVersion, mode: .uidOnly))
+                                               helper: HelperVersion(version: HelperTransport.helperVersion, protocolVersion: HelperTransport.protocolVersion, mode: .uidOnly))
         expectEqual(uidOnly.callerCheck, "Caller check: UID-only")
         expectTrue(uidOnly.callerCheckIsWeak)
         // No answer from the helper: no mode is claimed.

@@ -112,7 +112,7 @@ public enum HelperInstaller {
 
 /// A failed version call alone does not mean the helper is not installed.
 public struct HelperInstallationStatus: Equatable, Sendable {
-    public enum State { case missing, incomplete, unavailable, ready, versionMismatch }
+    public enum State { case missing, incomplete, unavailable, ready, repairRecommended, versionMismatch }
     public let executablePresent: Bool
     public let launchDaemonPresent: Bool
     /// What the running helper reported, nil if it did not answer.
@@ -125,7 +125,9 @@ public struct HelperInstallationStatus: Equatable, Sendable {
     public var state: State {
         if let helper {
             guard executablePresent && launchDaemonPresent else { return .incomplete }
-            return helper.protocolVersion == HelperTransport.protocolVersion ? .ready : .versionMismatch
+            guard helper.protocolVersion == HelperTransport.protocolVersion else { return .versionMismatch }
+            // An older helper keeps what its own installer wrote; it still connects, so this never blocks.
+            return helper.version == HelperTransport.helperVersion ? .ready : .repairRecommended
         }
         if executablePresent && launchDaemonPresent { return .unavailable }
         return executablePresent || launchDaemonPresent ? .incomplete : .missing
@@ -136,6 +138,7 @@ public struct HelperInstallationStatus: Equatable, Sendable {
         case .incomplete: return "Installation needs repair"
         case .unavailable: return "Installed · not responding"
         case .ready: return "Installed and running"
+        case .repairRecommended: return "Installed · repair recommended"
         case .versionMismatch: return "Installed · update required"
         }
     }
@@ -145,6 +148,7 @@ public struct HelperInstallationStatus: Equatable, Sendable {
         case .incomplete: return "Helper files are incomplete. Repair the installation."
         case .unavailable: return "The helper is installed, but could not be reached. Try Refresh or Repair."
         case .ready: return "Version \(helper?.version ?? "") · Ready to connect."
+        case .repairRecommended: return "The helper is version \(helper?.version ?? ""); this app expects \(HelperTransport.helperVersion). Repair / Reinstall Helper updates it."
         case .versionMismatch: return "The helper speaks protocol \(helper?.protocolVersion ?? 0); this app requires protocol \(HelperTransport.protocolVersion). Repair the installation."
         }
     }

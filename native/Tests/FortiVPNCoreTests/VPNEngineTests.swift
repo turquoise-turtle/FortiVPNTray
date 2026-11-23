@@ -11,6 +11,7 @@ final class FakeHelperAPI: HelperAPI, @unchecked Sendable {
     private var _disconnects = 0
     private var _logReads: [Int] = []
     var protocolVersion = HelperTransport.protocolVersion
+    var helperVersion = HelperTransport.helperVersion
     var connectError: String?
     var currentStatus = HelperStatus()
     var log: [String] = []
@@ -24,7 +25,7 @@ final class FakeHelperAPI: HelperAPI, @unchecked Sendable {
     func set(_ change: (FakeHelperAPI) -> Void) { lock.withLock { change(self) } }
 
     func version() throws -> HelperVersion {
-        lock.withLock { HelperVersion(version: "0.3.0", protocolVersion: protocolVersion, mode: .signed) }
+        lock.withLock { HelperVersion(version: helperVersion, protocolVersion: protocolVersion, mode: .signed) }
     }
     func status() throws -> HelperStatus { lock.withLock { currentStatus } }
     func connect(_ request: ConnectRequest) throws -> String {
@@ -86,6 +87,15 @@ struct VPNEngineTests {
         let second = VPNEngine(helper: refusing)
         await #expect(throws: VPNError("A session is already active.")) { try await second.start(profile: profile(), settings: AppSettings()) }
         #expect(await !second.hasSession)
+    }
+
+    @Test func testStartAcceptsAHelperOfAnotherVersionWithTheSameProtocol() async throws {
+        // Settings recommends a repair for it; connecting must keep working until then.
+        let helper = FakeHelperAPI()
+        helper.set { $0.helperVersion = "0.3.0" }
+        let engine = VPNEngine(helper: helper)
+        try await engine.start(profile: profile(), settings: AppSettings())
+        #expect(helper.requests.count == 1)
     }
 
     @Test func testPollReadsTheLogOnAndReportsConnectedOnce() async throws {
