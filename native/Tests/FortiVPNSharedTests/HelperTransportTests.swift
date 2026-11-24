@@ -19,7 +19,7 @@ struct HelperTransportTests {
 
     @Test func testMachServiceIsTheHelperLabel() {
         #expect(HelperTransport.machServiceName == "eu.dvad.fortivpntray.helper")
-        #expect(HelperTransport.protocolVersion == 1)
+        #expect(HelperTransport.protocolVersion == 2)
     }
 
     @Test func testSignedArgumentsParse() throws {

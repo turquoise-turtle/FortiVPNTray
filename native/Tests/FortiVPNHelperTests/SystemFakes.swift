@@ -164,6 +164,25 @@ struct TemporaryStateStore {
     var exists: Bool { FileManager.default.fileExists(atPath: store.path) }
 }
 
+/// An approvals store in a temporary directory, trusted as if the test user were root.
+struct TemporaryApprovalStore {
+    let root: String
+    let store: ApprovalStore
+
+    init() throws {
+        root = TestDirectories.root + "/" + UUID().uuidString
+        try FakeInstall.makeDirectory(root)
+        store = ApprovalStore(directory: RunDirectory(path: root + "/support", trust: FakeInstall.trust, owner: getuid()))
+    }
+
+    var exists: Bool { FileManager.default.fileExists(atPath: store.path) }
+}
+
+struct FakeAdmins: AdminMembership {
+    let admin: Bool
+    func isAdmin(uid: uid_t) -> Bool { admin }
+}
+
 extension SessionController {
     /// For tests that do not look at the system side: fake processes (the mock
     /// launcher's, if it is one) and network, and a temporary state store.

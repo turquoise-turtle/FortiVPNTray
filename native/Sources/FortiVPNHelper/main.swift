@@ -30,7 +30,8 @@ let sessions = SessionController(launcher: OpenFortiVPNLauncher(processes: proce
                                  store: .production)
 // Undo whatever a session of an earlier run left behind (crash, sleep, restart) before serving anyone.
 sessions.sweep()
-guard let callerCheck = CallerCheck(arguments: launchArguments, sessions: sessions) else {
+let approvals = GatewayApprovals(arguments: launchArguments, store: .production, admins: SystemAdminMembership())
+guard let callerCheck = CallerCheck(arguments: launchArguments, sessions: sessions, approvals: approvals) else {
     log.fault("Refusing to start: the caller requirement could not be built")
     exit(EX_USAGE)
 }
@@ -38,5 +39,5 @@ guard let callerCheck = CallerCheck(arguments: launchArguments, sessions: sessio
 let listener = NSXPCListener(machServiceName: HelperTransport.machServiceName)
 listener.delegate = callerCheck
 listener.resume()
-log.notice("Helper \(HelperTransport.helperVersion, privacy: .public) listening, caller check: \(launchArguments.callerCheck.mode.rawValue, privacy: .public), allowed uid \(launchArguments.allowedUID, privacy: .public), approved gateways: \(launchArguments.gateways.count, privacy: .public)")
+log.notice("Helper \(HelperTransport.helperVersion, privacy: .public) listening, caller check: \(launchArguments.callerCheck.mode.rawValue, privacy: .public), allowed uid \(launchArguments.allowedUID, privacy: .public), approved gateways: \(launchArguments.gateways.count, privacy: .public) at install, \(approvals.storedCount, privacy: .public) since")
 RunLoop.main.run()

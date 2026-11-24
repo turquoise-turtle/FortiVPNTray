@@ -32,7 +32,7 @@ struct CoreTests {
         expectEqual(old.state, .repairRecommended)
         expectEqual(old.title, "Installed · repair recommended")
         expectEqual(old.detail, "The helper is version 0.3.0; this app expects \(HelperTransport.helperVersion). Repair / Reinstall Helper updates it.")
-        expectTrue(old.detail.contains("0.4.0"))
+        expectTrue(old.detail.contains("0.5.0"))
         expectEqual(old.callerCheck, "Caller check: Signed caller check")
         let current = HelperInstallationStatus(executablePresent: true, launchDaemonPresent: true,
                                                helper: HelperVersion(version: HelperTransport.helperVersion, protocolVersion: HelperTransport.protocolVersion, mode: .signed))

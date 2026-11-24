@@ -24,6 +24,9 @@ public protocol HelperAPI: Sendable {
     func disconnect() throws
     func readLog(sessionID: String, offset: Int) throws -> LogChunk
     func pendingSAMLURL() throws -> URL?
+    /// Adds gateways and pins to those the helper connects to. The helper refuses unless
+    /// the user is an administrator and the caller check is the signed one.
+    func approveGateways(_ gateways: [AllowedGateway]) throws
 }
 
 /// Calls the Swift helper over XPC. One connection is kept and reused, so polling
@@ -98,6 +101,14 @@ public final class HelperXPCClient: HelperAPI, @unchecked Sendable {
     public func pendingSAMLURL() throws -> URL? {
         try call(timeout) { proxy, done in
             proxy.pendingSAMLURL { text in done(.success(text.flatMap(URL.init(string:)))) }
+        }
+    }
+
+    public func approveGateways(_ gateways: [AllowedGateway]) throws {
+        let approval: GatewayApproval
+        do { approval = try GatewayApproval(gateways: gateways) } catch { throw VPNError(error.description) }
+        try call(timeout) { proxy, done in
+            proxy.approveGateways(approval.json()) { error in done(error.map { .failure(VPNError($0)) } ?? .success(())) }
         }
     }
 

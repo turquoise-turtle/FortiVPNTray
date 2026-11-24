@@ -13,6 +13,12 @@ final class FakeHelperAPI: HelperAPI, @unchecked Sendable {
     var protocolVersion = HelperTransport.protocolVersion
     var helperVersion = HelperTransport.helperVersion
     var connectError: String?
+    var mode = CallerCheckMode.signed
+    /// The helper refuses connects as not approved until an approval succeeds (and `approvalTakesEffect`).
+    var unapproved = false
+    var approvalTakesEffect = true
+    var approveError: String?
+    private var _approvals: [[AllowedGateway]] = []
     var currentStatus = HelperStatus()
     var log: [String] = []
     var samlURL: URL?
@@ -21,17 +27,19 @@ final class FakeHelperAPI: HelperAPI, @unchecked Sendable {
     var requests: [ConnectRequest] { lock.withLock { _requests } }
     var disconnects: Int { lock.withLock { _disconnects } }
     var logReads: [Int] { lock.withLock { _logReads } }
+    var approvals: [[AllowedGateway]] { lock.withLock { _approvals } }
 
     func set(_ change: (FakeHelperAPI) -> Void) { lock.withLock { change(self) } }
 
     func version() throws -> HelperVersion {
-        lock.withLock { HelperVersion(version: helperVersion, protocolVersion: protocolVersion, mode: .signed) }
+        lock.withLock { HelperVersion(version: helperVersion, protocolVersion: protocolVersion, mode: mode) }
     }
     func status() throws -> HelperStatus { lock.withLock { currentStatus } }
     func connect(_ request: ConnectRequest) throws -> String {
         try lock.withLock {
             _requests.append(request)
             if let connectError { throw VPNError(connectError) }
+            if unapproved { throw VPNError(HelperRefusal.gatewayNotApproved) }
             currentStatus = HelperStatus(state: .connecting, sessionID: sessionID)
             return sessionID
         }
@@ -52,6 +60,13 @@ final class FakeHelperAPI: HelperAPI, @unchecked Sendable {
         }
     }
     func pendingSAMLURL() throws -> URL? { lock.withLock { samlURL } }
+    func approveGateways(_ gateways: [AllowedGateway]) throws {
+        try lock.withLock {
+            _approvals.append(gateways)
+            if let approveError { throw VPNError(approveError) }
+            if approvalTakesEffect { unapproved = false }
+        }
+    }
 }
 
 struct VPNEngineTests {

@@ -5,10 +5,10 @@ public enum HelperTransport {
     /// Mach service the helper's launchd job registers. Same as its label.
     public static let machServiceName = AppIdentity.helperLabel
     /// Bumped whenever the XPC interface changes incompatibly.
-    public static let protocolVersion = 1
+    public static let protocolVersion = 2
     /// Version of the Swift helper itself. Raised whenever what the installer writes or the
     /// helper enforces changes, so that Settings can ask for a repair.
-    public static let helperVersion = "0.4.0"
+    public static let helperVersion = "0.5.0"
 }
 
 /// How the helper decides which callers it talks to. The raw value crosses XPC.
@@ -38,11 +38,22 @@ public enum CallerCheckMode: String, Sendable, Equatable {
     func readLog(sessionID: String, offset: Int, reply: @escaping @Sendable (Data?, String?) -> Void)
     /// Replies with the SAML login URL the helper parsed from openfortivpn's output, if one is pending.
     func pendingSAMLURL(reply: @escaping @Sendable (String?) -> Void)
+    /// `gateways` is a `GatewayApproval` as JSON: gateways and pins to add to the approved ones.
+    /// Replies with an error or nil. Refused in UID-only mode and unless the allowed user is an administrator.
+    func approveGateways(_ gateways: Data, reply: @escaping @Sendable (String?) -> Void)
+}
+
+/// Refusals the app acts on: it compares these constants, never wording of its own.
+public enum HelperRefusal {
+    /// `connect` for a gateway, or with a certificate pin, that is not among the approved ones.
+    public static let gatewayNotApproved = "The helper has not been approved for this gateway or for this certificate pin. " +
+        "Approve it when the app asks, or open Settings and choose Repair / Reinstall Helper."
 }
 
 /// A gateway the helper may connect to, with the certificate pins it may use there.
-/// The list is fixed in the launch arguments, behind the admin prompt: the app takes
-/// host and pins from a profile file any process of the user can rewrite.
+/// The list comes from the launch arguments, behind the admin prompt, and from approvals
+/// an administrator confirmed in the app (`GatewayApproval`): the app takes host and pins
+/// from a profile file any process of the user can rewrite.
 public struct AllowedGateway: Equatable, Sendable {
     public struct Invalid: Error, Equatable, CustomStringConvertible {
         public let description: String

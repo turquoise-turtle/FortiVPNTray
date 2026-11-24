@@ -33,9 +33,11 @@ struct CallerCheckTests {
     private func call<Value: Sendable>(
         _ arguments: HelperLaunchArguments, clientIdentifier: String = AppIdentity.identifier,
         sessions: SessionController = SessionController(launcher: MockLauncher(fails: true)),
+        approvals: GatewayApprovals? = nil,
         _ body: @escaping @Sendable (HelperXPCProtocol, @escaping @Sendable (Value) -> Void) -> Void
     ) async throws -> Value? {
-        let check = try #require(CallerCheck(arguments: arguments, sessions: sessions, clientIdentifier: clientIdentifier))
+        let approvals = try approvals ?? GatewayApprovals(arguments: arguments, store: TemporaryApprovalStore().store, admins: FakeAdmins(admin: true))
+        let check = try #require(CallerCheck(arguments: arguments, sessions: sessions, approvals: approvals, clientIdentifier: clientIdentifier))
         let listener = NSXPCListener.anonymous()
         listener.delegate = check
         listener.resume()
@@ -93,8 +95,9 @@ struct CallerCheckTests {
     @Test func testUnbuildableRequirementDoesNotFallBackToUIDOnly() throws {
         let signed = try HelperLaunchArguments(allowedUID: getuid(), callerCheck: .signed(leafSHA1: String(repeating: "A", count: 40)))
         let sessions = SessionController(launcher: MockLauncher(fails: true))
-        #expect(CallerCheck(arguments: signed, sessions: sessions, clientIdentifier: "bad\" or anchor apple") == nil)
-        #expect(CallerCheck(arguments: signed, sessions: sessions, clientIdentifier: "") == nil)
+        let approvals = GatewayApprovals(arguments: signed, store: try TemporaryApprovalStore().store, admins: FakeAdmins(admin: true))
+        #expect(CallerCheck(arguments: signed, sessions: sessions, approvals: approvals, clientIdentifier: "bad\" or anchor apple") == nil)
+        #expect(CallerCheck(arguments: signed, sessions: sessions, approvals: approvals, clientIdentifier: "") == nil)
     }
 
     // The tunnel calls over the same connection: arguments and replies survive XPC,
@@ -145,6 +148,24 @@ struct CallerCheckTests {
         // The approved gateway with the approved pin, in any letter case, connects.
         let accepted = try #require(try await connect(arguments, try ConnectRequest(host: "VPN.example.com", port: 443, trustedCerts: [pin]), sessions: sessions))
         #expect(accepted.error == nil && accepted.value != nil)
+    }
+
+    /// The test runner passes only the UID-only caller check, and there any process of the
+    /// user could ask: the approval is refused over the real connection, and nothing is kept.
+    @Test func testApprovalOverXPCIsRefusedInUIDOnlyMode() async throws {
+        let arguments = try HelperLaunchArguments(allowedUID: getuid(), callerCheck: .uidOnly)
+        let temporary = try TemporaryApprovalStore()
+        let approvals = GatewayApprovals(arguments: arguments, store: temporary.store, admins: FakeAdmins(admin: true))
+        let sessions = SessionController(launcher: AcceptingLauncher())
+        let approval = try GatewayApproval(gateways: [try AllowedGateway(host: "vpn.example.com", port: 443)]).json()
+        let reply = try await call(arguments, sessions: sessions, approvals: approvals) { proxy, done in
+            proxy.approveGateways(approval) { done(Reply(value: nil, error: $0)) }
+        }
+        #expect(reply == Reply(value: nil, error: GatewayApprovals.uidOnlyRefusal.description))
+        #expect(!temporary.exists)
+        let request = try ConnectRequest(host: "vpn.example.com", port: 443).json()
+        let connect = try await call(arguments, sessions: sessions, approvals: approvals) { proxy, done in proxy.connect(request) { done(Reply(value: $0, error: $1)) } }
+        #expect(connect == Reply(value: nil, error: HelperRefusal.gatewayNotApproved))
     }
 
     @Test func testConnectStatusAndLogOverXPC() async throws {

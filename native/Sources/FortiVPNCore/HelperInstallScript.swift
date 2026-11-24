@@ -78,6 +78,7 @@ public enum HelperInstallScript {
     support=\(Commands.shellQuote(AppIdentity.helperSupportDirectory))
     run_dir=\(Commands.shellQuote(AppIdentity.helperRunDirectory))
     state_file=\(Commands.shellQuote(AppIdentity.helperStateFile))
+    approvals_file=\(Commands.shellQuote(AppIdentity.helperApprovalsFile))
     old_socket=\(Commands.shellQuote(AppIdentity.socketPath))
     old_log=\(Commands.shellQuote(AppIdentity.helperLogPath))
     source_binary=\(Commands.shellQuote(homebrewOpenFortiVPN))
@@ -108,6 +109,9 @@ public enum HelperInstallScript {
     # 1. Stop the running helper. The Rust helper used the same label and path.
     launchctl bootout "system/$label" 2>/dev/null || true
     rm -f "$old_socket" "$old_log"
+    # Gateways approved in the app since the last install: from here on only the ones in
+    # the new launch arguments count, which the password prompt just named.
+    rm -f "$approvals_file" "$approvals_file.new"
 
     # 2. The helper binary, only if it is the file the app hashed.
     install -d -o root -g wheel -m 755 /Library/PrivilegedHelperTools

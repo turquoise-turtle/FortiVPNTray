@@ -16,6 +16,8 @@ public enum AppIdentity {
     public static let helperSupportDirectory = "/Library/Application Support/\(helperLabel)"
     /// The helper's state file (PLAN.md 2.5); it exists while a session needs cleaning up.
     public static let helperStateFile = "\(helperSupportDirectory)/state.json"
+    /// Gateways an administrator approved in the app since the last install; the installer removes it.
+    public static let helperApprovalsFile = "\(helperSupportDirectory)/approved-gateways.json"
     /// Root-owned `0700` directory for per-session openfortivpn config files.
     public static let helperRunDirectory = "\(helperSupportDirectory)/run"
     public static let dnsServiceKey = "State:/Network/Service/\(identifier)/DNS"

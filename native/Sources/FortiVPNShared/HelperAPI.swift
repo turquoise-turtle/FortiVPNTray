@@ -124,6 +124,100 @@ extension ConnectRequest: Codable {
     }
 }
 
+/// Gateways and pins to approve, as the app sends them to `approveGateways` and as the
+/// helper keeps them: `{"gateways":[{"host":…,"port":…,"trustedCerts":[…]}]}`.
+/// Like `ConnectRequest`, a value that exists is valid.
+public struct GatewayApproval: Equatable, Sendable {
+    /// Room for `HelperLaunchArguments.maxGateways` entries with every pin; larger bodies are refused unparsed.
+    public static let maxEncodedSize = 128 * 1024
+
+    /// Why an approval was refused. Descriptions never repeat the offending value.
+    public enum Rejection: Error, Equatable, CustomStringConvertible {
+        case tooLarge
+        case malformed
+        case empty
+        case duplicate
+        case tooMany
+
+        public var description: String {
+            switch self {
+            case .tooLarge: return "The gateway approval is too large."
+            case .malformed: return "The gateway approval is malformed."
+            case .empty: return "The gateway approval names no gateway."
+            case .duplicate: return "The gateway approval names a gateway twice."
+            case .tooMany: return "At most \(HelperLaunchArguments.maxGateways) gateways can be approved."
+            }
+        }
+    }
+
+    public let gateways: [AllowedGateway]
+
+    public init(gateways: [AllowedGateway]) throws(Rejection) {
+        guard !gateways.isEmpty else { throw .empty }
+        guard gateways.count <= HelperLaunchArguments.maxGateways else { throw .tooMany }
+        for (index, gateway) in gateways.enumerated() {
+            guard !gateways[..<index].contains(where: { $0.host == gateway.host && $0.port == gateway.port }) else { throw .duplicate }
+        }
+        self.gateways = gateways
+    }
+
+    /// Parses and validates what a caller sent or a file holds. Unknown or missing keys,
+    /// wrong types and invalid hosts, ports or fingerprints are `.malformed`.
+    public init(json: Data) throws(Rejection) {
+        guard json.count <= Self.maxEncodedSize else { throw .tooLarge }
+        let entries: [Entry]
+        do {
+            entries = try JSONDecoder().decode(Body.self, from: json).gateways
+        } catch {
+            throw .malformed
+        }
+        try self.init(gateways: entries.map(\.gateway))
+    }
+
+    public func json() -> Data {
+        // Encoding strings, integers and arrays cannot fail.
+        try! JSONEncoder().encode(Body(gateways: gateways.map(Entry.init)))
+    }
+
+    private struct Body: Codable {
+        enum Keys: String, CodingKey, CaseIterable { case gateways }
+        let gateways: [Entry]
+
+        init(gateways: [Entry]) { self.gateways = gateways }
+
+        init(from decoder: Decoder) throws {
+            try StrictKeys.require(Keys.self, in: decoder)
+            gateways = try decoder.container(keyedBy: Keys.self).decode([Entry].self, forKey: .gateways)
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: Keys.self)
+            try c.encode(gateways, forKey: .gateways)
+        }
+    }
+
+    private struct Entry: Codable {
+        enum Keys: String, CodingKey, CaseIterable { case host, port, trustedCerts }
+        let gateway: AllowedGateway
+
+        init(_ gateway: AllowedGateway) { self.gateway = gateway }
+
+        init(from decoder: Decoder) throws {
+            try StrictKeys.require(Keys.self, in: decoder)
+            let c = try decoder.container(keyedBy: Keys.self)
+            gateway = try AllowedGateway(host: try c.decode(String.self, forKey: .host), port: try c.decode(Int.self, forKey: .port),
+                                         trustedCerts: try c.decode([String].self, forKey: .trustedCerts))
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: Keys.self)
+            try c.encode(gateway.host, forKey: .host)
+            try c.encode(gateway.port, forKey: .port)
+            try c.encode(gateway.trustedCerts, forKey: .trustedCerts)
+        }
+    }
+}
+
 /// Rejects a JSON object that has any key the type does not know.
 private enum StrictKeys {
     private struct AnyKey: CodingKey {

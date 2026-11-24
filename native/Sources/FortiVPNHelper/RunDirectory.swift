@@ -60,6 +60,38 @@ struct RunDirectory: Sendable {
         return file
     }
 
+    /// The contents of `name`, nil if there is none. Only a regular file of `owner` that
+    /// nobody else can read or write, and no larger than `maxSize`, is read; a link is never followed.
+    func read(_ name: String, maxSize: Int) throws -> Data? {
+        let file = path + "/" + name
+        let fd = open(file, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
+        if fd < 0 {
+            if errno == ENOENT { return nil }
+            throw Failure(description: "Cannot open \(file): \(String(cString: strerror(errno)))")
+        }
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_uid == owner, info.st_mode & 0o077 == 0 else {
+            throw Failure(description: "\(file) is not a regular 0600 file of uid \(owner)")
+        }
+        guard info.st_size <= maxSize else { throw Failure(description: "\(file) is too large") }
+        var data = Data(count: maxSize + 1)
+        let count = data.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+        guard count >= 0, count <= maxSize else { throw Failure(description: "Cannot read \(file)") }
+        return data.prefix(count)
+    }
+
+    /// Replaces `name` atomically: a new file under `temporaryName`, then `rename` over the old one.
+    func replace(_ name: String, temporaryName: String, contents: Data) throws {
+        remove(temporaryName)
+        let temporary = try create(temporaryName, contents: contents)
+        guard rename(temporary, path + "/" + name) == 0 else {
+            let reason = String(cString: strerror(errno))
+            remove(temporaryName)
+            throw Failure(description: "Cannot replace \(path)/\(name): \(reason)")
+        }
+    }
+
     /// Removes a file this directory created. Missing is not an error.
     func remove(_ name: String) {
         unlink(path + "/" + name)

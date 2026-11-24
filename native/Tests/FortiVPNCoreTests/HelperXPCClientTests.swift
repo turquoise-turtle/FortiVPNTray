@@ -48,6 +48,28 @@ struct HelperXPCClientTests {
         func disconnect(reply: @escaping @Sendable (String?) -> Void) { reply(disconnectError) }
         func readLog(sessionID: String, offset: Int, reply: @escaping @Sendable (Data?, String?) -> Void) { reply(logReply.0, logReply.1) }
         func pendingSAMLURL(reply: @escaping @Sendable (String?) -> Void) { reply(samlURL) }
+        var approveError: String?
+        func approveGateways(_ gateways: Data, reply: @escaping @Sendable (String?) -> Void) {
+            lock.withLock { _received.append(gateways) }
+            reply(approveError)
+        }
+    }
+
+    @Test func testApproveGatewaysSendsTheApprovalAndReportsARefusal() async throws {
+        let gateways = [try AllowedGateway(host: "vpn.example.com", port: 443, trustedCerts: [String(repeating: "ab", count: 32)])]
+        let accepting = fixture(FakeHelper())
+        defer { accepting.invalidate() }
+        let client = accepting.client
+        #expect(await offPool { try client.approveGateways(gateways); return true } == .success(true))
+        #expect(try accepting.helper.receivedRequests.map { try GatewayApproval(json: $0).gateways } == [gateways])
+
+        let helper = FakeHelper()
+        helper.approveError = "Only an administrator of this Mac can approve a VPN gateway."
+        let refusing = fixture(helper)
+        defer { refusing.invalidate() }
+        let second = refusing.client
+        #expect(await offPool { try second.approveGateways(gateways); return true } == .failure(VPNError("Only an administrator of this Mac can approve a VPN gateway.")))
+        #expect(await offPool { try second.approveGateways([]); return true } == .failure(VPNError(GatewayApproval.Rejection.empty.description)))
     }
 
     /// A client and the listener it talks to. The listener holds its delegate weakly,

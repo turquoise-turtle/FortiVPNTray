@@ -54,6 +54,7 @@ struct HelperInstallScriptTests {
         support='/Library/Application Support/eu.dvad.fortivpntray.helper'
         run_dir='/Library/Application Support/eu.dvad.fortivpntray.helper/run'
         state_file='/Library/Application Support/eu.dvad.fortivpntray.helper/state.json'
+        approvals_file='/Library/Application Support/eu.dvad.fortivpntray.helper/approved-gateways.json'
         old_socket='/var/run/eu.dvad.fortivpntray.helper.sock'
         old_log='/var/log/eu.dvad.fortivpntray.helper.log'
         source_binary='/opt/homebrew/bin/openfortivpn'
@@ -199,9 +200,9 @@ struct HelperInstallScriptTests {
     @Test func testValuesSurviveQuoting() throws {
         let odd = "/Users/Someone/My Apps/It's \"here\" $(touch x) `id`/FortiVPNTray.app/Contents/Resources/FortiVPNHelper"
         let script = try HelperInstallScript.install(arguments: try Self.signed(), bundledHelper: odd, bundledHelperSHA256: Self.hash)
-        let read = try values(of: script, ["bundled_helper", "bundled_helper_sha256", "plist_xml", "support", "state_file", "label"])
+        let read = try values(of: script, ["bundled_helper", "bundled_helper_sha256", "plist_xml", "support", "state_file", "approvals_file", "label"])
         #expect(read == [odd, Self.hash, HelperInstallScript.plist(arguments: try Self.signed()),
-                         AppIdentity.helperSupportDirectory, AppIdentity.helperStateFile, AppIdentity.helperLabel])
+                         AppIdentity.helperSupportDirectory, AppIdentity.helperStateFile, AppIdentity.helperApprovalsFile, AppIdentity.helperLabel])
     }
 
     @Test func testBadValuesAreRefused() throws {
@@ -345,7 +346,7 @@ struct HelperInstallScriptTests {
     /// Every variable that holds a path is expanded inside double quotes, so a space
     /// ("/Library/Application Support") never splits it.
     @Test func testPathVariablesAreAlwaysQuoted() throws {
-        let paths = ["helper", "plist", "dotd", "support", "run_dir", "state_file", "old_socket", "old_log", "source_binary",
+        let paths = ["helper", "plist", "dotd", "support", "run_dir", "state_file", "approvals_file", "old_socket", "old_log", "source_binary",
                      "bundled_helper", "stage", "path", "directory", "file", "current", "reference", "real", "binary_real"]
         for script in [try HelperInstallScript.install(arguments: try Self.signed(), bundledHelper: Self.bundled, bundledHelperSHA256: Self.hash),
                        HelperInstallScript.uninstall()] {
@@ -411,6 +412,7 @@ struct HelperInstallScriptTests {
             "[[ -e \"$source_binary\" ]] || die \"Homebrew's openfortivpn is missing",
             "launchctl bootout \"system/$label\"",
             "rm -f \"$old_socket\" \"$old_log\"",
+            "rm -f \"$approvals_file\" \"$approvals_file.new\"",
             "!= \"$bundled_helper_sha256\" ]]",
             "mv -f \"$helper.new\" \"$helper\"",
             "mkdir -m 755 \"$stage\" \"$stage/lib\" \"$stage/certs\"",
@@ -430,6 +432,21 @@ struct HelperInstallScriptTests {
         #expect(script.components(separatedBy: "non_system_libraries \"$current\"").count == 2, "otool runs once per file, before the loop")
         #expect(!script.contains("ossl-modules"))
         #expect(!script.contains("/tmp"), "root creates nothing under /tmp")
+    }
+
+    /// After Install/Repair only the gateways in the new launch arguments are approved:
+    /// what was approved with Touch ID since the last install is removed while the helper is stopped.
+    @Test func testInstallRemovesApprovalsMadeSinceTheLastInstall() throws {
+        let script = try HelperInstallScript.install(arguments: try Self.signed(), bundledHelper: Self.bundled, bundledHelperSHA256: Self.hash)
+        let remove = try #require(script.range(of: "rm -f \"$approvals_file\" \"$approvals_file.new\"")).lowerBound
+        let stop = try #require(script.range(of: "launchctl bootout \"system/$label\"")).lowerBound
+        let start = try #require(script.range(of: "launchctl bootstrap system \"$plist\"")).lowerBound
+        #expect(stop < remove && remove < start)
+        #expect(try values(of: script, ["approvals_file"]) == [AppIdentity.helperApprovalsFile])
+        // The link check on its directory comes first, so the removal cannot be led elsewhere.
+        #expect(try #require(script.range(of: "for path in \"$helper\" \"$plist\" \"$dotd\" \"$support\"; do")).lowerBound < remove)
+        // Uninstall removes the whole directory.
+        #expect(HelperInstallScript.uninstall().contains("rm -rf \"$dotd\" \"$dotd.new\" \"$support\""))
     }
 
     // MARK: Admin prompt
