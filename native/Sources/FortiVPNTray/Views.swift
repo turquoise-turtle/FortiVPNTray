@@ -407,7 +407,7 @@ struct SettingsView: View {
                         Button(model.helperRefreshing ? "Checking…" : "Refresh") { model.refreshHelper() }
                             .buttonStyle(.bordered).disabled(model.helperBusy || model.helperRefreshing)
                     }.font(.system(size: 12))
-                    Text("Install and uninstall require macOS administrator permission. Installing or repairing also approves the gateways and certificate pins of your saved profiles for the helper; a new profile or pin needs a repair before it can connect. Uninstalling preserves your VPN profiles.")
+                    Text("Install and uninstall require macOS administrator permission. Installing or repairing also approves the gateways and certificate pins of your saved profiles for the helper, and withdraws approvals given since. A new profile or pin is approved with Touch ID or your login password when you first connect, if you are an administrator of this Mac and the app is locally signed; otherwise it needs a repair. Uninstalling preserves your VPN profiles.")
                         .font(.system(size: 11)).foregroundStyle(Appearance.secondary)
                     if let update = model.openfortivpnUpdate, update.state != .notInstalled {
                         Divider().padding(.vertical, 4)

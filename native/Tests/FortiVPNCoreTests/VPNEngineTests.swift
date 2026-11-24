@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import LocalAuthentication
 import FortiVPNShared
 @testable import FortiVPNCore
 
@@ -67,6 +68,27 @@ final class FakeHelperAPI: HelperAPI, @unchecked Sendable {
             if approvalTakesEffect { unapproved = false }
         }
     }
+}
+
+/// Answers the approval prompt as the test says; no prompt is ever shown.
+final class FakeAuthoriser: ApprovalAuthoriser, @unchecked Sendable {
+    // @unchecked Sendable: `_reasons` is only touched while holding `lock`.
+    private let lock = NSLock()
+    private var _reasons: [String] = []
+    let answer: ApprovalAuthorisation
+    var reasons: [String] { lock.withLock { _reasons } }
+
+    init(_ answer: ApprovalAuthorisation = .approved) { self.answer = answer }
+
+    func authorise(reason: String) async -> ApprovalAuthorisation {
+        lock.withLock { _reasons.append(reason) }
+        return answer
+    }
+}
+
+struct FakeAdminMembership: AdminMembership {
+    var admin = true
+    func isAdmin(uid: uid_t) -> Bool { admin }
 }
 
 struct VPNEngineTests {
@@ -242,6 +264,129 @@ struct VPNEngineTests {
         #expect(try await !engine.endLeftoverSession())
         #expect(helper.disconnects == 1)
         #expect(await engine.hasSession)
+    }
+
+    // MARK: Approving a gateway with Touch ID
+
+    private static let pin = String(repeating: "ab", count: 32)
+
+    private func unapproved(_ change: (FakeHelperAPI) -> Void = { _ in }) -> FakeHelperAPI {
+        let helper = FakeHelperAPI()
+        helper.set { $0.unapproved = true; change($0) }
+        return helper
+    }
+
+    private func failure(_ engine: VPNEngine) async -> String? {
+        do {
+            try await engine.start(profile: profile(), settings: AppSettings())
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    @Test func testAnUnapprovedGatewayIsApprovedWithTouchIDAndConnectedOnce() async throws {
+        let helper = unapproved()
+        let authoriser = FakeAuthoriser(.approved)
+        let engine = VPNEngine(helper: helper, authoriser: authoriser, admins: FakeAdminMembership())
+        try await engine.start(profile: profile(), settings: AppSettings())
+        #expect(authoriser.reasons == ["allow its VPN helper to connect to vpn.example.com:10443 (with 1 pinned certificate)"])
+        #expect(helper.approvals == [[try AllowedGateway(host: "vpn.example.com", port: 10443, trustedCerts: [Self.pin])]])
+        #expect(helper.requests.count == 2, "refused once, retried once")
+        #expect(helper.requests.first == helper.requests.last)
+        #expect(await engine.hasSession)
+    }
+
+    @Test func testADeclinedPromptApprovesNothingAndDoesNotRetry() async throws {
+        let helper = unapproved()
+        let authoriser = FakeAuthoriser(.declined)
+        let engine = VPNEngine(helper: helper, authoriser: authoriser, admins: FakeAdminMembership())
+        #expect(await failure(engine) == "vpn.example.com:10443 was not approved for the VPN helper: the Touch ID or password prompt was cancelled. Connect again to approve it.")
+        #expect(authoriser.reasons.count == 1)
+        #expect(helper.approvals.isEmpty)
+        #expect(helper.requests.count == 1)
+        #expect(await !engine.hasSession)
+    }
+
+    @Test func testAPromptThatCannotBeShownApprovesNothing() async throws {
+        let helper = unapproved()
+        let engine = VPNEngine(helper: helper, authoriser: FakeAuthoriser(.unavailable("No password is set.")), admins: FakeAdminMembership())
+        #expect(await failure(engine) == "vpn.example.com:10443 could not be approved for the VPN helper: No password is set. Open Settings and choose Repair / Reinstall Helper instead.")
+        #expect(helper.approvals.isEmpty && helper.requests.count == 1)
+    }
+
+    @Test func testAnApprovalTheHelperRefusesIsNotRetried() async throws {
+        let helper = unapproved { $0.approveError = "Only an administrator of this Mac can approve a VPN gateway." }
+        let authoriser = FakeAuthoriser(.approved)
+        let engine = VPNEngine(helper: helper, authoriser: authoriser, admins: FakeAdminMembership())
+        #expect(await failure(engine) == "The VPN helper did not approve vpn.example.com:10443. Only an administrator of this Mac can approve a VPN gateway.")
+        #expect(helper.approvals.count == 1)
+        #expect(helper.requests.count == 1, "no retry")
+        #expect(await !engine.hasSession)
+    }
+
+    @Test func testAnApprovedGatewayShowsNoPrompt() async throws {
+        let helper = FakeHelperAPI()
+        let authoriser = FakeAuthoriser(.approved)
+        let engine = VPNEngine(helper: helper, authoriser: authoriser, admins: FakeAdminMembership())
+        try await engine.start(profile: profile(), settings: AppSettings())
+        #expect(authoriser.reasons.isEmpty)
+        #expect(helper.approvals.isEmpty)
+        #expect(helper.requests.count == 1)
+    }
+
+    @Test func testAnotherConnectErrorShowsNoPrompt() async throws {
+        let helper = FakeHelperAPI()
+        helper.set { $0.connectError = "A session is already active." }
+        let authoriser = FakeAuthoriser(.approved)
+        let engine = VPNEngine(helper: helper, authoriser: authoriser, admins: FakeAdminMembership())
+        #expect(await failure(engine) == "A session is already active.")
+        #expect(authoriser.reasons.isEmpty && helper.approvals.isEmpty && helper.requests.count == 1)
+    }
+
+    /// The helper keeps refusing after it took the approval: one prompt, one retry, then the error.
+    @Test func testAConnectStillRefusedAfterApprovalNeverLoops() async throws {
+        let helper = unapproved { $0.approvalTakesEffect = false }
+        let authoriser = FakeAuthoriser(.approved)
+        let engine = VPNEngine(helper: helper, authoriser: authoriser, admins: FakeAdminMembership())
+        #expect(await failure(engine) == HelperRefusal.gatewayNotApproved)
+        #expect(authoriser.reasons.count == 1 && helper.approvals.count == 1 && helper.requests.count == 2)
+    }
+
+    @Test func testAUIDOnlyHelperOrAStandardUserGetsNoPrompt() async throws {
+        let uidOnly = unapproved { $0.mode = .uidOnly }
+        let authoriser = FakeAuthoriser(.approved)
+        #expect(await failure(VPNEngine(helper: uidOnly, authoriser: authoriser, admins: FakeAdminMembership())) == VPNEngine.approvalNeedsRepair)
+        #expect(VPNEngine.approvalNeedsRepair.contains("Repair / Reinstall Helper"))
+        #expect(uidOnly.approvals.isEmpty && uidOnly.requests.count == 1)
+
+        let standard = unapproved()
+        #expect(await failure(VPNEngine(helper: standard, authoriser: authoriser, admins: FakeAdminMembership(admin: false))) == VPNEngine.approvalNeedsAdministrator)
+        #expect(standard.approvals.isEmpty && standard.requests.count == 1)
+        #expect(authoriser.reasons.isEmpty)
+    }
+
+    @Test func testThePromptNamesEveryGatewayAndItsPins() throws {
+        let gateways = [try AllowedGateway(host: "vpn.example.com", port: 443, trustedCerts: [Self.pin]),
+                        try AllowedGateway(host: "192.0.2.7", port: 10443),
+                        try AllowedGateway(host: "b.example.com", port: 8443, trustedCerts: [Self.pin, String(repeating: "cd", count: 32)])]
+        #expect(GatewayApprovalPrompt.reason(for: gateways)
+                == "allow its VPN helper to connect to vpn.example.com:443 (with 1 pinned certificate), 192.0.2.7:10443, b.example.com:8443 (with 2 pinned certificates)")
+    }
+
+    @Test func testOnlyACancelledPromptCountsAsDeclined() {
+        typealias Authoriser = LocalAuthenticationAuthoriser
+        #expect(Authoriser.outcome(success: true, error: nil) == .approved)
+        for code in [LAError.userCancel, .appCancel, .systemCancel] {
+            #expect(Authoriser.outcome(success: false, error: LAError(code)) == .declined)
+        }
+        for code in [LAError.authenticationFailed, .passcodeNotSet, .notInteractive] {
+            guard case .unavailable = Authoriser.outcome(success: false, error: LAError(code)) else {
+                Issue.record("\(code) must not count as approved or declined")
+                continue
+            }
+        }
+        #expect(Authoriser.outcome(success: false, error: nil) == .unavailable("Authentication failed."))
     }
 
     @Test func testInterfaceBytesOnlyForPPPNames() {

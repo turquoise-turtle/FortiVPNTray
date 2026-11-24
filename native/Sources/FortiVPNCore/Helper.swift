@@ -93,11 +93,15 @@ public enum HelperInstaller {
         guard !gateways.isEmpty else {
             return "FortiVPNTray wants to install its VPN helper. No VPN gateway will be approved, because there is no saved profile: add one, then repair the helper."
         }
-        let list = gateways.map { gateway -> String in
+        return "FortiVPNTray wants to install its VPN helper and allow it to connect to: \(gatewayList(gateways)). Cancel if you do not recognise every one of them."
+    }
+
+    /// Every gateway as `host:port`, with the number of its pins: what a prompt shows before approving them.
+    static func gatewayList(_ gateways: [AllowedGateway]) -> String {
+        gateways.map { gateway -> String in
             let pins = gateway.trustedCerts.count
             return "\(gateway.host):\(gateway.port)" + (pins == 0 ? "" : " (with \(pins) pinned certificate\(pins == 1 ? "" : "s"))")
         }.joined(separator: ", ")
-        return "FortiVPNTray wants to install its VPN helper and allow it to connect to: \(list). Cancel if you do not recognise every one of them."
     }
 
     /// Refused while the helper reports a session; the script refuses too while the

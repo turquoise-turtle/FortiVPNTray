@@ -37,12 +37,24 @@ public actor VPNEngine {
         var seenSAMLURLs: Set<URL> = []
     }
 
+    static let approvalNeedsRepair = "The VPN helper has not been approved for this gateway or certificate pin, and a helper in UID-only mode takes approvals only at installation. " +
+        "Open Settings and choose Repair / Reinstall Helper."
+    static let approvalNeedsAdministrator = "The VPN helper has not been approved for this gateway or certificate pin, and only an administrator of this Mac can approve it. " +
+        "Ask an administrator to open Settings and choose Repair / Reinstall Helper."
+
     private let helper: any HelperAPI
+    private let authoriser: any ApprovalAuthoriser
+    private let admins: any AdminMembership
     private var session: Session?
 
     public var hasSession: Bool { session != nil }
 
-    public init(helper: any HelperAPI = HelperXPCClient()) { self.helper = helper }
+    public init(helper: any HelperAPI = HelperXPCClient(), authoriser: any ApprovalAuthoriser = LocalAuthenticationAuthoriser(),
+                admins: any AdminMembership = SystemAdminMembership()) {
+        self.helper = helper
+        self.authoriser = authoriser
+        self.admins = admins
+    }
 
     public func start(profile: VPNProfile, settings: AppSettings) async throws {
         guard session == nil else { throw VPNError("Disconnect the current session before reconnecting.") }
@@ -60,8 +72,44 @@ public actor VPNEngine {
         } catch {
             throw VPNError(error.description)
         }
-        let id = try helper.connect(request)
+        let id: String
+        do {
+            id = try helper.connect(request)
+        } catch let refusal as VPNError where refusal.message == HelperRefusal.gatewayNotApproved {
+            try await approve(profile, mode: version.mode)
+            try Task.checkCancellation()
+            // Once: a helper that still refuses is an error, not another prompt.
+            id = try helper.connect(request)
+        }
         session = Session(id: id, host: profile.host, port: profile.port)
+    }
+
+    /// Asks the user to approve the profile's gateway and pins for the helper, and tells the
+    /// helper. Throws unless the helper took the approval. The helper makes its own checks;
+    /// the ones here only spare the user a prompt that cannot succeed.
+    private func approve(_ profile: VPNProfile, mode: CallerCheckMode) async throws {
+        guard mode == .signed else { throw VPNError(Self.approvalNeedsRepair) }
+        guard admins.isAdmin(uid: getuid()) else { throw VPNError(Self.approvalNeedsAdministrator) }
+        let gateway: AllowedGateway
+        do {
+            gateway = try AllowedGateway(host: profile.host, port: profile.port, trustedCerts: profile.trustedCerts)
+        } catch {
+            throw VPNError("This profile's gateway cannot be approved: it is \(error).")
+        }
+        let name = "\(gateway.host):\(gateway.port)"
+        switch await authoriser.authorise(reason: GatewayApprovalPrompt.reason(for: [gateway])) {
+        case .approved: break
+        case .declined:
+            throw VPNError("\(name) was not approved for the VPN helper: the Touch ID or password prompt was cancelled. Connect again to approve it.")
+        case .unavailable(let reason):
+            throw VPNError("\(name) could not be approved for the VPN helper: \(reason) Open Settings and choose Repair / Reinstall Helper instead.")
+        }
+        try Task.checkCancellation()
+        do {
+            try helper.approveGateways([gateway])
+        } catch let refusal as VPNError {
+            throw VPNError("The VPN helper did not approve \(name). \(refusal.message)")
+        }
     }
 
     /// Ends a session the helper still runs but this app did not start: one left behind
